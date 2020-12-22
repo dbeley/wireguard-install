@@ -31,18 +31,17 @@ function checkOS() {
 	if [[ -e /etc/debian_version ]]; then
 		source /etc/os-release
 		OS="${ID}" # debian or ubuntu
-		if [[ -e /etc/debian_version ]]; then
-			if [[ ${ID} == "debian" || ${ID} == "raspbian" ]]; then
-				if [[ ${VERSION_ID} -ne 10 ]]; then
-					echo "Your version of Debian (${VERSION_ID}) is not supported. Please use Debian 10 Buster"
-					exit 1
-				fi
+		if [[ ${ID} == "debian" || ${ID} == "raspbian" ]]; then
+			if [[ ${VERSION_ID} -ne 10 ]]; then
+				echo "Your version of Debian (${VERSION_ID}) is not supported. Please use Debian 10 Buster"
+				exit 1
 			fi
 		fi
 	elif [[ -e /etc/fedora-release ]]; then
 		source /etc/os-release
 		OS="${ID}"
 	elif [[ -e /etc/centos-release ]]; then
+		source /etc/os-release
 		OS=centos
 	elif [[ -e /etc/arch-release ]]; then
 		OS=arch
@@ -80,7 +79,7 @@ function installQuestions() {
 		read -rp "Public interface: " -e -i "${SERVER_NIC}" SERVER_PUB_NIC
 	done
 
-	until [[ ${SERVER_WG_NIC} =~ ^[a-zA-Z0-9_]+$ ]]; do
+	until [[ ${SERVER_WG_NIC} =~ ^[a-zA-Z0-9_]+$ && ${#SERVER_WG_NIC} -lt 16 ]]; do
 		read -rp "WireGuard interface name: " -e -i wg0 SERVER_WG_NIC
 	done
 
@@ -100,10 +99,10 @@ function installQuestions() {
 
 	# Adguard DNS by default
 	until [[ ${CLIENT_DNS_1} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "First DNS resolver to use for the clients: " -e -i 176.103.130.130 CLIENT_DNS_1
+		read -rp "First DNS resolver to use for the clients: " -e -i 94.140.14.14 CLIENT_DNS_1
 	done
 	until [[ ${CLIENT_DNS_2} =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$ ]]; do
-		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 176.103.130.131 CLIENT_DNS_2
+		read -rp "Second DNS resolver to use for the clients (optional): " -e -i 94.140.15.15 CLIENT_DNS_2
 		if [[ ${CLIENT_DNS_2} == "" ]]; then
 			CLIENT_DNS_2="${CLIENT_DNS_1}"
 		fi
@@ -139,11 +138,19 @@ function installWireGuard() {
 		fi
 		dnf install -y wireguard-tools iptables qrencode
 	elif [[ ${OS} == 'centos' ]]; then
-		curl -Lo /etc/yum.repos.d/wireguard.repo https://copr.fedorainfracloud.org/coprs/jdoss/wireguard/repo/epel-7/jdoss-wireguard-epel-7.repo
-		yum -y install epel-release kernel kernel-devel kernel-headers
-		yum -y install wireguard-dkms wireguard-tools iptables qrencode
+		yum -y install epel-release elrepo-release
+		if [[ ${VERSION_ID} -eq 7 ]]; then
+			yum -y install yum-plugin-elrepo
+		fi
+		yum -y install kmod-wireguard wireguard-tools iptables qrencode
 	elif [[ ${OS} == 'arch' ]]; then
-		pacman -S --noconfirm linux-headers
+		# Check if current running kernel is LTS
+		ARCH_KERNEL_RELEASE=$(uname -r)
+		if [[ ${ARCH_KERNEL_RELEASE} == *lts* ]]; then
+			pacman -S --noconfirm linux-lts-headers
+		else
+			pacman -S --noconfirm linux-headers
+		fi
 		pacman -S --noconfirm wireguard-tools iptables qrencode
 	fi
 
@@ -179,8 +186,8 @@ PrivateKey = ${SERVER_PRIV_KEY}" >"/etc/wireguard/${SERVER_WG_NIC}.conf"
 		echo "PostUp = firewall-cmd --add-port ${SERVER_PORT}/udp && firewall-cmd --add-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade' && firewall-cmd --add-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/24 masquerade'
 PostDown = firewall-cmd --remove-port ${SERVER_PORT}/udp && firewall-cmd --remove-rich-rule='rule family=ipv4 source address=${FIREWALLD_IPV4_ADDRESS}/24 masquerade' && firewall-cmd --remove-rich-rule='rule family=ipv6 source address=${FIREWALLD_IPV6_ADDRESS}/24 masquerade'" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	else
-		echo "PostUp = iptables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE; ip6tables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; ip6tables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
-PostDown = iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE; ip6tables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
+		echo "PostUp = iptables -A FORWARD -i ${SERVER_PUB_NIC} -o ${SERVER_WG_NIC} -j ACCEPT; iptables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE; ip6tables -A FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; ip6tables -t nat -A POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE
+PostDown = iptables -D FORWARD -i ${SERVER_PUB_NIC} -o ${SERVER_WG_NIC} -j ACCEPT; iptables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE; ip6tables -D FORWARD -i ${SERVER_WG_NIC} -j ACCEPT; ip6tables -t nat -D POSTROUTING -o ${SERVER_PUB_NIC} -j MASQUERADE" >>"/etc/wireguard/${SERVER_WG_NIC}.conf"
 	fi
 
 	# Enable routing on the server
@@ -212,9 +219,9 @@ function newClient() {
 
 	echo ""
 	echo "Tell me a name for the client."
-	echo "The name must consist of alphanumeric character. It may also include an underscore or a dash."
+	echo "The name must consist of alphanumeric character. It may also include an underscore or a dash and can't exceed 15 chars."
 
-	until [[ ${CLIENT_NAME} =~ ^[a-zA-Z0-9_-]+$ && ${CLIENT_EXISTS} == '0' ]]; do
+	until [[ ${CLIENT_NAME} =~ ^[a-zA-Z0-9_-]+$ && ${CLIENT_EXISTS} == '0' && ${#CLIENT_NAME} -lt 16 ]]; do
 		read -rp "Client name: " -e CLIENT_NAME
 		CLIENT_EXISTS=$(grep -c -E "^### Client ${CLIENT_NAME}\$" "/etc/wireguard/${SERVER_WG_NIC}.conf")
 
@@ -337,46 +344,52 @@ function revokeClient() {
 }
 
 function uninstallWg() {
-	checkOS
+	echo ""
+	read -rp "Do you really want to remove WireGuard? [y/n]: " -e -i n REMOVE
+	if [[ $REMOVE == 'y' ]]; then
+		checkOS
 
-	systemctl stop "wg-quick@${SERVER_WG_NIC}"
-	systemctl disable "wg-quick@${SERVER_WG_NIC}"
+		systemctl stop "wg-quick@${SERVER_WG_NIC}"
+		systemctl disable "wg-quick@${SERVER_WG_NIC}"
 
-	if [[ ${OS} == 'ubuntu' ]]; then
-		apt-get autoremove --purge -y wireguard qrencode
-	elif [[ ${OS} == 'debian' ]]; then
-		apt-get autoremove --purge -y wireguard qrencode
-	elif [[ ${OS} == 'fedora' ]]; then
-		dnf remove -y wireguard-tools qrencode
-		if [[ ${VERSION_ID} -lt 32 ]]; then
-			dnf remove -y wireguard-dkms
-			dnf copr disable -y jdoss/wireguard
+		if [[ ${OS} == 'ubuntu' ]]; then
+			apt-get autoremove --purge -y wireguard qrencode
+		elif [[ ${OS} == 'debian' ]]; then
+			apt-get autoremove --purge -y wireguard qrencode
+		elif [[ ${OS} == 'fedora' ]]; then
+			dnf remove -y wireguard-tools qrencode
+			if [[ ${VERSION_ID} -lt 32 ]]; then
+				dnf remove -y wireguard-dkms
+				dnf copr disable -y jdoss/wireguard
+			fi
+			dnf autoremove -y
+		elif [[ ${OS} == 'centos' ]]; then
+			yum -y remove kmod-wireguard wireguard-tools qrencode
+			yum -y autoremove
+		elif [[ ${OS} == 'arch' ]]; then
+			pacman -Rs --noconfirm wireguard-tools qrencode
 		fi
-		dnf autoremove -y
-	elif [[ ${OS} == 'centos' ]]; then
-		yum -y remove wireguard-dkms wireguard-tools qrencode
-		rm -f "/etc/yum.repos.d/wireguard.repo"
-		yum -y autoremove
-	elif [[ ${OS} == 'arch' ]]; then
-		pacman -Rs --noconfirm wireguard-tools qrencode
-	fi
 
-	rm -rf /etc/wireguard
-	rm -f /etc/sysctl.d/wg.conf
+		rm -rf /etc/wireguard
+		rm -f /etc/sysctl.d/wg.conf
 
-	# Reload sysctl
-	sysctl --system
+		# Reload sysctl
+		sysctl --system
 
-	# Check if WireGuard is running
-	systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}"
-	WG_RUNNING=$?
+		# Check if WireGuard is running
+		systemctl is-active --quiet "wg-quick@${SERVER_WG_NIC}"
+		WG_RUNNING=$?
 
-	if [[ ${WG_RUNNING} -eq 0 ]]; then
-		echo "WireGuard failed to uninstall properly."
-		exit 1
+		if [[ ${WG_RUNNING} -eq 0 ]]; then
+			echo "WireGuard failed to uninstall properly."
+			exit 1
+		else
+			echo "WireGuard uninstalled successfully."
+			exit 0
+		fi
 	else
-		echo "WireGuard uninstalled successfully."
-		exit 0
+		echo ""
+		echo "Removal aborted!"
 	fi
 }
 
